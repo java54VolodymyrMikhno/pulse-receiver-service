@@ -20,6 +20,7 @@ public class PulseReceiverAppl {
     static DynamoDB dynamo = new DynamoDB(client);
     static Table table = dynamo.getTable("pulse_values");
     static Logger logger = Logger.getLogger(PulseReceiverAppl.class.getName());
+
     private static final String LOGGING_LEVEL = System.getenv().getOrDefault("LOGGING_LEVEL","INFO");
     private static final int MAX_THRESHOLD_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("MAX_THRESHOLD_PULSE_VALUE", "210"));
     private static final int MIN_THRESHOLD_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("MIN_THRESHOLD_PULSE_VALUE", "40"));
@@ -27,26 +28,11 @@ public class PulseReceiverAppl {
     private static final int WARN_MIN_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("WARN_MIN_PULSE_VALUE", "55"));
 
     public static void main(String[] args) throws Exception {
+        setLogger();
+        logConfig();
+        
         socket = new DatagramSocket(PORT);
         byte[] buffer = new byte[MAX_BUFFER_SIZE];
-        LogManager.getLogManager().reset();
-		try {
-			logger.setLevel(Level.parse(LOGGING_LEVEL));
-		} catch (IllegalArgumentException e) {
-			logger.setLevel(Level.INFO); 
-            logger.warning("Invalid LOGGING_LEVEL specified, defaulting to INFO");
-		}
-		Handler handlerConsole = new ConsoleHandler();
-		handlerConsole.setFormatter(new SimpleFormatter());
-		handlerConsole.setLevel(Level.FINEST);
-		logger.addHandler(handlerConsole);
-        
-        
-        logger.config("LOGGING_LEVEL: " + LOGGING_LEVEL);
-        logger.config("MAX_THRESHOLD_PULSE_VALUE: " + MAX_THRESHOLD_PULSE_VALUE);
-        logger.config("MIN_THRESHOLD_PULSE_VALUE: " + MIN_THRESHOLD_PULSE_VALUE);
-        logger.config("WARN_MAX_PULSE_VALUE: " + WARN_MAX_PULSE_VALUE);
-        logger.config("WARN_MIN_PULSE_VALUE: " + WARN_MIN_PULSE_VALUE);
         
         logger.info("Using DynamoDB table: "+ table.getTableName());
         
@@ -57,24 +43,53 @@ public class PulseReceiverAppl {
         }
     }
 
+    private static void setLogger() {
+        LogManager.getLogManager().reset();
+        try {
+            logger.setLevel(Level.parse(LOGGING_LEVEL));
+        } catch (IllegalArgumentException e) {
+            logger.setLevel(Level.INFO); 
+            logger.warning("Invalid LOGGING_LEVEL specified, defaulting to INFO");
+        }
+        
+        Handler handlerConsole = new ConsoleHandler();
+        handlerConsole.setFormatter(new SimpleFormatter());
+        handlerConsole.setLevel(Level.FINEST);
+        logger.addHandler(handlerConsole);
+    }
+
+    private static void logConfig() {
+        logger.config("LOGGING_LEVEL: " + LOGGING_LEVEL);
+        logger.config("MAX_THRESHOLD_PULSE_VALUE: " + MAX_THRESHOLD_PULSE_VALUE);
+        logger.config("MIN_THRESHOLD_PULSE_VALUE: " + MIN_THRESHOLD_PULSE_VALUE);
+        logger.config("WARN_MAX_PULSE_VALUE: " + WARN_MAX_PULSE_VALUE);
+        logger.config("WARN_MIN_PULSE_VALUE: " + WARN_MIN_PULSE_VALUE);
+    }
+
     private static void processReceivedData(byte[] buffer, DatagramPacket packet) {
         String json = new String(Arrays.copyOf(buffer, packet.getLength()));
-        logger.fine("Received SensorDataobject:"+ json);
+        logger.fine("Received SensorData object: " + json);
+        
         JSONObject jo = new JSONObject(json);
         int pulseValue = jo.getInt("value");
         Long patientId = jo.getLong("patientId");
         Long timestamp = jo.getLong("timestamp");
+        
         logger.finer("Storing data - patientId: " + patientId + ", timestamp: " + timestamp);
-   
         table.putItem(new PutItemSpec().withItem(Item.fromJSON(json)));
-        if (pulseValue > WARN_MAX_PULSE_VALUE && pulseValue <= MAX_THRESHOLD_PULSE_VALUE) {
-            logger.warning("Warning: High pulse value: " + pulseValue);
-        } else if (pulseValue < WARN_MIN_PULSE_VALUE && pulseValue >= MIN_THRESHOLD_PULSE_VALUE) {
-            logger.warning("Warning: Low pulse value: " + pulseValue);
-        } else if (pulseValue > MAX_THRESHOLD_PULSE_VALUE) {
+        
+        logAbnormalPulseValues(pulseValue);
+    }
+
+    private static void logAbnormalPulseValues(int pulseValue) {
+        if (pulseValue > MAX_THRESHOLD_PULSE_VALUE) {
             logger.severe("Severe: Pulse value exceeds maximum threshold: " + pulseValue);
         } else if (pulseValue < MIN_THRESHOLD_PULSE_VALUE) {
             logger.severe("Severe: Pulse value below minimum threshold: " + pulseValue);
+        } else if (pulseValue > WARN_MAX_PULSE_VALUE) {
+            logger.warning("Warning: High pulse value: " + pulseValue);
+        } else if (pulseValue < WARN_MIN_PULSE_VALUE) {
+            logger.warning("Warning: Low pulse value: " + pulseValue);
         }
     }
 }
