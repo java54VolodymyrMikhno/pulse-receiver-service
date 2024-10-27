@@ -30,7 +30,12 @@ public class PulseReceiverAppl {
         socket = new DatagramSocket(PORT);
         byte[] buffer = new byte[MAX_BUFFER_SIZE];
         LogManager.getLogManager().reset();
-		logger.setLevel(Level.parse(LOGGING_LEVEL));
+		try {
+			logger.setLevel(Level.parse(LOGGING_LEVEL));
+		} catch (IllegalArgumentException e) {
+			logger.setLevel(Level.INFO); 
+            logger.warning("Invalid LOGGING_LEVEL specified, defaulting to INFO");
+		}
 		Handler handlerConsole = new ConsoleHandler();
 		handlerConsole.setFormatter(new SimpleFormatter());
 		handlerConsole.setLevel(Level.FINEST);
