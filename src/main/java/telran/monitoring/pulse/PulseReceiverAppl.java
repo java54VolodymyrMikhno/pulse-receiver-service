@@ -1,95 +1,89 @@
 package telran.monitoring.pulse;
 
-import java.net.*;
-import java.util.Arrays;
-import java.util.logging.*;
-import org.json.JSONObject;
+import static telran.monitoring.pulse.PulseReceiverDefaultConfigValues.*;
 
-import com.amazonaws.services.dynamodbv2.*;
-import com.amazonaws.services.dynamodbv2.document.*;
-import com.amazonaws.services.dynamodbv2.document.spec.PutItemSpec;
-import com.amazonaws.regions.Regions;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.logging.*;
+
+
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest.Builder;
+import telran.monitoring.pulse.dto.SensorData;
 
 public class PulseReceiverAppl {
-    private static final int PORT = 5000;
-    private static final int MAX_BUFFER_SIZE = 1500;
-    static DatagramSocket socket;
-    static AmazonDynamoDB client = AmazonDynamoDBAsyncClientBuilder.standard()
-        .withRegion(Regions.US_EAST_1) 
-        .build();
-    static DynamoDB dynamo = new DynamoDB(client);
-    static Table table = dynamo.getTable("pulse_values");
-    static Logger logger = Logger.getLogger(PulseReceiverAppl.class.getName());
+	static PulseReceiverConfigValues configValues;
+	static DatagramSocket socket;
+	static DynamoDbClient client = DynamoDbClient.builder().build();
+	static Builder request;
+	
+	static Logger logger = Logger.getLogger("PulseReceiverAppl");
+	
+	public static void main(String[] args) throws Exception {
+		configValues = PulseReceiverConfigValues.getConfigValues(logger);
+		request = PutItemRequest.builder().tableName(configValues.getTableName());
 
-    private static final String LOGGING_LEVEL = System.getenv().getOrDefault("LOGGING_LEVEL","INFO");
-    private static final int MAX_THRESHOLD_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("MAX_THRESHOLD_PULSE_VALUE", "210"));
-    private static final int MIN_THRESHOLD_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("MIN_THRESHOLD_PULSE_VALUE", "40"));
-    private static final int WARN_MAX_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("WARN_MAX_PULSE_VALUE", "180"));
-    private static final int WARN_MIN_PULSE_VALUE = Integer.parseInt(System.getenv().getOrDefault("WARN_MIN_PULSE_VALUE", "55"));
+		setLogger();
 
-    public static void main(String[] args) throws Exception {
-        setLogger();
-        logConfig();
-        
-        socket = new DatagramSocket(PORT);
-        byte[] buffer = new byte[MAX_BUFFER_SIZE];
-        
-        logger.info("Using DynamoDB table: "+ table.getTableName());
-        
-        while (true) {
-            DatagramPacket packet = new DatagramPacket(buffer, MAX_BUFFER_SIZE);
-            socket.receive(packet);
-            processReceivedData(buffer, packet);
-        }
-    }
+		logger.config(configValues.toString());
+		logger.info("DynamoDB table is " + configValues.getTableName());
+		socket = new DatagramSocket(DEFAULT_PORT);
+		byte[] buffer = new byte[DEFAULT_MAX_BUFFER_SIZE];
+		while (true) {
+			DatagramPacket packet = new DatagramPacket(buffer, DEFAULT_MAX_BUFFER_SIZE);
+			socket.receive(packet);
+			processReceivedData(packet);
+		}
 
-    private static void setLogger() {
-        LogManager.getLogManager().reset();
-        try {
-            logger.setLevel(Level.parse(LOGGING_LEVEL));
-        } catch (IllegalArgumentException e) {
-            logger.setLevel(Level.INFO); 
-            logger.warning("Invalid LOGGING_LEVEL specified, defaulting to INFO");
-        }
-        
-        Handler handlerConsole = new ConsoleHandler();
-        handlerConsole.setFormatter(new SimpleFormatter());
-        handlerConsole.setLevel(Level.FINEST);
-        logger.addHandler(handlerConsole);
-    }
+	}
 
-    private static void logConfig() {
-        logger.config("LOGGING_LEVEL: " + LOGGING_LEVEL);
-        logger.config("MAX_THRESHOLD_PULSE_VALUE: " + MAX_THRESHOLD_PULSE_VALUE);
-        logger.config("MIN_THRESHOLD_PULSE_VALUE: " + MIN_THRESHOLD_PULSE_VALUE);
-        logger.config("WARN_MAX_PULSE_VALUE: " + WARN_MAX_PULSE_VALUE);
-        logger.config("WARN_MIN_PULSE_VALUE: " + WARN_MIN_PULSE_VALUE);
-    }
+	private static void processReceivedData(DatagramPacket packet) {
+		String json = new String(Arrays.copyOf(packet.getData(), packet.getLength()));
+		logger.fine(json);
+		SensorData sensorData = SensorData.getSensorData(json);
+		client.putItem(request.item(getMapItem(sensorData)).build());
+		logger.finer(String.format("table: %s added item with partition key is %d," + " sorted key is %d",
+				configValues.getTableName(), sensorData.patientId(), sensorData.timestamp()));
+		logAbnormalValue(sensorData);
+	}
 
-    private static void processReceivedData(byte[] buffer, DatagramPacket packet) {
-        String json = new String(Arrays.copyOf(buffer, packet.getLength()));
-        logger.fine("Received SensorData object: " + json);
-        
-        JSONObject jo = new JSONObject(json);
-        int pulseValue = jo.getInt("value");
-        Long patientId = jo.getLong("patientId");
-        Long timestamp = jo.getLong("timestamp");
-        
-        logger.finer("Storing data - patientId: " + patientId + ", timestamp: " + timestamp);
-        table.putItem(new PutItemSpec().withItem(Item.fromJSON(json)));
-        
-        logAbnormalPulseValues(pulseValue);
-    }
+	private static void logAbnormalValue(SensorData sensorData) {
+		int pulseValue = sensorData.value();
+		if (pulseValue > configValues.getMaxThresholdPulse()) {
+			logger.severe(String.format("pulse value greater than %d, sensor data %s",
+					configValues.getMaxThresholdPulse(), sensorData));
+		} else if (pulseValue < configValues.getMinThresholdPulse()) {
+			logger.severe(String.format("pulse value less than %d, sensor data %s", configValues.getMinThresholdPulse(),
+					sensorData));
+		} else if(pulseValue > configValues.getWarnMaxPulse() ) {
+			logger.warning(String.format("pulse value greater than %d, sensor data %s", configValues.getWarnMaxPulse(),
+					sensorData)); 
+		} else if (pulseValue < configValues.getWarnMinPulse()) {
+			logger.warning(String.format("pulse value less than %d, sensor data %s", configValues.getWarnMinPulse(),
+					sensorData));
+		}
+	}
 
-    private static void logAbnormalPulseValues(int pulseValue) {
-        if (pulseValue > MAX_THRESHOLD_PULSE_VALUE) {
-            logger.severe("Severe: Pulse value exceeds maximum threshold: " + pulseValue);
-        } else if (pulseValue < MIN_THRESHOLD_PULSE_VALUE) {
-            logger.severe("Severe: Pulse value below minimum threshold: " + pulseValue);
-        } else if (pulseValue > WARN_MAX_PULSE_VALUE) {
-            logger.warning("Warning: High pulse value: " + pulseValue);
-        } else if (pulseValue < WARN_MIN_PULSE_VALUE) {
-            logger.warning("Warning: Low pulse value: " + pulseValue);
-        }
-    }
+	private static Map<String, AttributeValue> getMapItem(SensorData sensorData) {
+		HashMap<String, AttributeValue> res = new HashMap<>();
+		res.put("patientId", AttributeValue.builder().n(sensorData.patientId() + "").build());
+		res.put("timestamp", AttributeValue.builder().n(sensorData.timestamp() + "").build());
+		res.put("value", AttributeValue.builder().n(sensorData.value() + "").build());
+		return res;
+	}
+
+	private static void setLogger() {
+		LogManager.getLogManager().reset();
+		Handler handler = new ConsoleHandler();
+		logger.setLevel(configValues.getLoggerLevel());
+		handler.setLevel(Level.FINEST);
+		logger.addHandler(handler);
+		
+	}
+
 }
